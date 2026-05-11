@@ -1,0 +1,25 @@
+skills/hatch-me/references/algorithm.md
+  s_a9671ebea75e0c::t_3695b6fb01bd8a 1-39,92-107,109-110
+README.md
+  s_a9671ebea75e0c::t_385a6dc3ad8ef8 3-5,13-72,75-76
+skills/hatch-me/scripts/moon_phase.py
+  s_a9671ebea75e0c::t_3695b6fb01bd8a 2-17,24-26,28-29,35-37,45-48,50-51,306,311-566,617,620-635,646-662
+skills/hatch-me/SKILL.md
+  s_a9671ebea75e0c::t_3695b6fb01bd8a 8-11,14-39,46-48,54-70,110,113,115-119
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "52beaef79a4e0cebd7d522402d736d39b2eaa5bd",
+  "prompts": {},
+  "sessions": {
+    "s_a9671ebea75e0c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f47b713c-01c6-41ac-a742-50a68ab7c7fd",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "anh nguyen <anh.nqqq@icloud.com>"
+    }
+  }
+}
