@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
 """moon_phase.py — accurate lunar phase from a UTC date(time), with cross-verification.
 
-FOUR independent sources, one verifier:
+Local Meeus math, optionally cross-checked against NASA JPL Horizons:
 
   ┌──────────────────────────────────────────────────────────────────────────┐
-  │ SOURCES                                          GROUND TRUTH            │
-  │   meeus    Local Meeus AA2 (Ch. 7/47/48/49)      ┌─────────────────────┐ │
-  │   codex    Ask the `codex` CLI (LLM)        ───▶ │ jpl   JPL Horizons  │ │
-  │   claude   Ask the `claude` CLI (LLM)            │       HTTP API      │ │
-  │                                                  └─────────────────────┘ │
-  │                                                                          │
-  │ Each source returns illum% + phase_name.                                 │
-  │ `--verify` runs the non-JPL sources and prints the delta vs JPL.         │
+  │ source                          verifier                                 │
+  │   meeus  Local Meeus AA2  ─────▶ jpl  NASA JPL Horizons HTTP API         │
+  │   offline, deterministic, <1 ms  no key, ~500 ms, ground truth           │
   └──────────────────────────────────────────────────────────────────────────┘
 
 Meeus implements:
@@ -25,16 +20,12 @@ JPL Horizons returns quantities 10 (Illu%) and 24 (S-T-O = phase angle)
 for body 301 (Moon) from Earth geocenter 500@399. Endpoint:
 https://ssd.jpl.nasa.gov/api/horizons.api (no key, public).
 
-LLM sources shell out to the local `codex`/`claude` CLI. Unreliable for
-specific astronomical events; included for comparison and demo only.
-
 Inputs are interpreted as UTC. Pass --tz ±HH:MM for civil time.
 
 Usage:
     python3 moon_phase.py --date 1995-08-14T10:20:00
     python3 moon_phase.py --date 1995-08-14T10:20:00 --source jpl
     python3 moon_phase.py --date 1995-08-14T10:20:00 --verify
-    python3 moon_phase.py --date 1995-08-14T10:20:00 --verify --with-llm
     python3 moon_phase.py --self-test
 """
 from __future__ import annotations
@@ -42,10 +33,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
-import re
-import shutil
-import subprocess
 import sys
 import urllib.parse
 import urllib.request
@@ -379,87 +366,12 @@ def moon_phase_jpl(dt_utc: datetime, timeout: float = 15.0) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# LLM sources — `codex` / `claude` CLI shell-out (opt-in)                     #
-# --------------------------------------------------------------------------- #
-
-LLM_PROMPT = (
-    "What was the moon phase at {iso} UTC? Respond ONLY with one line of JSON: "
-    '{{"phase_name": "<New Moon|Waxing Crescent|First Quarter|Waxing Gibbous|'
-    'Full Moon|Waning Gibbous|Last Quarter|Waning Crescent>", '
-    '"illumination_pct": <number 0-100>}}. '
-    "No prose, no markdown, no code fences."
-)
-
-DEFAULT_LLM_CMDS = {
-    # Override with env var HATCH_ME_<NAME>_CMD (whitespace-split, prompt appended).
-    "codex":  ["codex", "exec"],
-    "claude": ["claude", "-p"],
-}
-
-
-def _llm_command(runner: str) -> list[str]:
-    env_override = os.environ.get(f"HATCH_ME_{runner.upper()}_CMD")
-    if env_override:
-        return env_override.split()
-    return list(DEFAULT_LLM_CMDS[runner])
-
-
-def moon_phase_llm(dt_utc: datetime, runner: str = "codex", timeout: float = 60.0) -> dict:
-    """Ask the local `codex` or `claude` CLI for the moon phase.
-
-    Returns whatever the LLM claims, plus the raw response (truncated).
-    LLMs are unreliable for specific astronomical events — this is included
-    for comparison and demo, never as a primary source.
-    """
-    if runner not in DEFAULT_LLM_CMDS:
-        raise ValueError(f"unknown LLM runner: {runner}")
-    if not shutil.which(_llm_command(runner)[0]):
-        raise RuntimeError(f"{runner} CLI not found in PATH")
-
-    iso = dt_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-    prompt = LLM_PROMPT.format(iso=iso)
-    cmd = _llm_command(runner) + [prompt]
-    try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"{runner} timed out after {timeout}s") from exc
-
-    raw = (out.stdout or "").strip()
-    if out.returncode != 0:
-        raise RuntimeError(
-            f"{runner} exited {out.returncode}: {(out.stderr or '')[:200]}"
-        )
-
-    name: str | None = None
-    illum: float | None = None
-    m = re.search(r'\{[^{}]*"phase_name"[^{}]*\}', raw, re.DOTALL)
-    if m:
-        try:
-            obj = json.loads(m.group(0))
-            name = obj.get("phase_name")
-            illum = float(obj["illumination_pct"]) if "illumination_pct" in obj else None
-        except (json.JSONDecodeError, ValueError, TypeError):
-            pass
-
-    return {
-        "source": f"llm:{runner}",
-        "input_utc": iso,
-        "phase_name": name,
-        "illumination_pct": illum,
-        "raw_response": raw[:500],
-        "note": "LLM output; unreliable on specific astronomical events.",
-    }
-
-
-# --------------------------------------------------------------------------- #
 # Cross-verification                                                          #
 # --------------------------------------------------------------------------- #
 
 SOURCE_FNS = {
-    "meeus":  moon_phase,
-    "jpl":    moon_phase_jpl,
-    "codex":  lambda dt: moon_phase_llm(dt, runner="codex"),
-    "claude": lambda dt: moon_phase_llm(dt, runner="claude"),
+    "meeus": moon_phase,
+    "jpl":   moon_phase_jpl,
 }
 
 # Tolerances against JPL ground truth.
@@ -467,28 +379,23 @@ TOLERANCE_ILLUM_PCT = 1.0    # Meeus typically <0.5%, LLMs frequently fail this.
 TOLERANCE_ANGLE_DEG = 0.5
 
 
-def verify(dt_utc: datetime, sources: list[str]) -> dict:
-    """Run each source and compute deltas against JPL Horizons.
+def verify(dt_utc: datetime) -> dict:
+    """Run local Meeus and compute deltas against JPL Horizons (ground truth).
 
-    JPL is always run as ground truth. `sources` lists which other sources
-    to invoke. Returns a structured report; pretty-printing is the CLI's job.
+    Returns a structured report; pretty-printing is the CLI's job.
     """
     results: dict[str, dict] = {}
     errors: dict[str, str] = {}
 
-    # JPL first (truth).
     try:
         results["jpl"] = moon_phase_jpl(dt_utc)
     except Exception as exc:
         errors["jpl"] = str(exc)
 
-    for src in sources:
-        if src == "jpl":
-            continue
-        try:
-            results[src] = SOURCE_FNS[src](dt_utc)
-        except Exception as exc:
-            errors[src] = str(exc)
+    try:
+        results["meeus"] = moon_phase(dt_utc)
+    except Exception as exc:
+        errors["meeus"] = str(exc)
 
     truth = results.get("jpl")
     diffs: dict[str, dict] = {}
@@ -614,7 +521,7 @@ def _self_test() -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Moon phase: local math, JPL truth, optional LLMs.")
+    ap = argparse.ArgumentParser(description="Moon phase: local Meeus math, verified against NASA JPL Horizons.")
     ap.add_argument("--date", help="YYYY-MM-DD[THH:MM[:SS]]; UTC unless --tz given.")
     ap.add_argument("--tz", help="Offset like -07:00 applied when --date has no tz.")
     ap.add_argument(
@@ -628,11 +535,6 @@ def main() -> int:
         action="store_true",
         help="Run meeus + JPL Horizons and print a comparison table. JPL is ground truth.",
     )
-    ap.add_argument(
-        "--with-llm",
-        action="store_true",
-        help="With --verify, also ask `codex` and `claude` CLIs and include in the table.",
-    )
     ap.add_argument("--self-test", action="store_true", help="Run reference checks.")
     ap.add_argument("--pretty", action="store_true", help="Indent JSON output.")
     args = ap.parse_args()
@@ -645,10 +547,7 @@ def main() -> int:
     dt = _parse_dt(args.date, args.tz)
 
     if args.verify:
-        sources = ["meeus"]
-        if args.with_llm:
-            sources += ["codex", "claude"]
-        report = verify(dt, sources)
+        report = verify(dt)
         if args.pretty:
             print(json.dumps(report, indent=2))
         else:

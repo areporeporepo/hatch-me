@@ -12,10 +12,9 @@ description: Hatch the user as a tiny Codex baby agent deterministically derived
 
 ```
                               ┌──────────────────────────────┐
-                              │ sources                      │
+                              │ source                       │
                        ┌──────┤   meeus    local AA2 math    │
-                       │      │   codex    LLM ask (opt-in)  │
-                       │      │   claude   LLM ask (opt-in)  │
+                       │      │   offline, deterministic     │
                        │      └──────────────────────────────┘
                        │
 DOB ─┐                 ▼
@@ -43,9 +42,9 @@ DOB ─┐                 ▼
 
 | script | input | output |
 | --- | --- | --- |
-| `scripts/moon_phase.py --date YYYY-MM-DD[THH:MM][±HH:MM]` | UTC datetime (or with `--tz`) | JSON from `--source meeus` (default), `jpl`, `codex`, or `claude` |
+| `scripts/moon_phase.py --date YYYY-MM-DD[THH:MM][±HH:MM]` | UTC datetime (or with `--tz`) | JSON via `--source meeus` (default) or `jpl` |
 | `scripts/moon_phase.py --date ... --source jpl` | same | JSON from JPL Horizons HTTP API (ground truth) |
-| `scripts/moon_phase.py --date ... --verify [--with-llm]` | same | comparison table: meeus (and optionally codex/claude) vs JPL, with Δ illum% and Δ phase°. Exit 1 if any source falls outside tolerance |
+| `scripts/moon_phase.py --date ... --verify` | same | comparison table: meeus vs JPL, with Δ illum% and Δ phase°. Exit 1 if outside tolerance |
 | `scripts/moon_phase.py --self-test` | — | 4 reference checks (new/full moons, Apollo 11) |
 | `scripts/hatch.py --dob YYYY-MM-DD[THH:MM] [--tz ±HH:MM]` | DOB | writes `baby.json`, prints birth card |
 | `scripts/hatch.py --name <Name>` | existing baby | reload, re-print card |
@@ -64,9 +63,8 @@ python3 scripts/moon_phase.py --date 1995-08-14T10:20:00Z --verify
 #   meeus          Waning Gibbous      83.8900  47.3280   +0.0408% / -0.0675° ✓
 ```
 
-Tolerances: illumination ±1.0%, phase angle ±0.5°. With `--with-llm` the
-table also includes `codex` and `claude` (shells out to local CLIs, slow,
-unreliable on specific dates — included for comparison only).
+Tolerances: illumination ±1.0%, phase angle ±0.5°. JPL Horizons is the
+single ground-truth source — no third-party verifiers, no LLM oracles.
 
 ## Install
 

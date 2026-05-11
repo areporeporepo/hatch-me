@@ -1,27 +1,20 @@
 # algorithm: moon-phase math + cross-verification
 
-`scripts/moon_phase.py` exposes four sources of the same answer (illuminated
-fraction + phase angle) and one verifier. The default is the local Meeus
-implementation; the others exist so the math can be audited end-to-end.
+`scripts/moon_phase.py` ships one local implementation and one network
+verifier. The default is the local Meeus math; JPL Horizons is the single
+source of truth used when `--verify` is passed.
 
 ## Sources
 
 ```
                                    ┌─────────────────────────────────┐
-                                   │ default source                  │
+                                   │ default source (used for hatch) │
                           ┌────────┤   meeus   pure-Python AA2       │
                           │        │   offline, deterministic, <1 ms │
                           │        └─────────────────────────────────┘
-                          │
+DOB / any UTC instant ────┤
                           │        ┌─────────────────────────────────┐
-                          │        │ opt-in comparison sources       │
-DOB / any UTC instant ────┼────────┤   codex   local `codex` CLI ask │
-                          │        │   claude  local `claude` CLI ask│
-                          │        │   ~5 s each, may hallucinate    │
-                          │        └─────────────────────────────────┘
-                          │
-                          │        ┌─────────────────────────────────┐
-                          │        │ ground truth                    │
+                          │        │ ground truth (verifier)         │
                           └───────▶│   jpl     NASA JPL Horizons     │
                                    │   https://ssd.jpl.nasa.gov/api  │
                                    │   /horizons.api                 │
@@ -30,7 +23,7 @@ DOB / any UTC instant ────┼────────┤   codex   local
                                    │   ~500 ms, no key, public       │
                                    └────────────┬────────────────────┘
                                                 ▼
-                                       --verify compares all
+                                       --verify compares meeus to jpl
                                        |Δ illum%| ≤ 1.0
                                        |Δ phase°| ≤ 0.5
                                        phase name must match
