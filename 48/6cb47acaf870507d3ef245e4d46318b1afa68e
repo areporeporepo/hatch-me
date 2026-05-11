@@ -1,0 +1,19 @@
+README.md
+  s_a9671ebea75e0c::t_bcefba26e914f2 4-5,14,16,42,44-45,60
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "486cb47acaf870507d3ef245e4d46318b1afa68e",
+  "prompts": {},
+  "sessions": {
+    "s_a9671ebea75e0c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f47b713c-01c6-41ac-a742-50a68ab7c7fd",
+        "model": "unknown"
+      },
+      "human_author": "anh nguyen <anh.nqqq@icloud.com>"
+    }
+  }
+}
