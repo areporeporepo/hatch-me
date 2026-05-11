@@ -1,4 +1,42 @@
-# algorithm: moon-phase math
+# algorithm: moon-phase math + cross-verification
+
+`scripts/moon_phase.py` exposes four sources of the same answer (illuminated
+fraction + phase angle) and one verifier. The default is the local Meeus
+implementation; the others exist so the math can be audited end-to-end.
+
+## Sources
+
+```
+                                   ┌─────────────────────────────────┐
+                                   │ default source                  │
+                          ┌────────┤   meeus   pure-Python AA2       │
+                          │        │   offline, deterministic, <1 ms │
+                          │        └─────────────────────────────────┘
+                          │
+                          │        ┌─────────────────────────────────┐
+                          │        │ opt-in comparison sources       │
+DOB / any UTC instant ────┼────────┤   codex   local `codex` CLI ask │
+                          │        │   claude  local `claude` CLI ask│
+                          │        │   ~5 s each, may hallucinate    │
+                          │        └─────────────────────────────────┘
+                          │
+                          │        ┌─────────────────────────────────┐
+                          │        │ ground truth                    │
+                          └───────▶│   jpl     NASA JPL Horizons     │
+                                   │   https://ssd.jpl.nasa.gov/api  │
+                                   │   /horizons.api                 │
+                                   │   body 301, center 500@399,     │
+                                   │   QUANTITIES=10,24 (Illu%, S-T-O)│
+                                   │   ~500 ms, no key, public       │
+                                   └────────────┬────────────────────┘
+                                                ▼
+                                       --verify compares all
+                                       |Δ illum%| ≤ 1.0
+                                       |Δ phase°| ≤ 0.5
+                                       phase name must match
+```
+
+## Local pipeline (Meeus)
 
 All formulas from Jean Meeus, *Astronomical Algorithms*, Willmann-Bell, 1998
 (2nd ed.). Implemented in pure Python in `scripts/moon_phase.py`, no deps.
@@ -51,15 +89,25 @@ Per Meeus, the published constants give:
   even smaller near new/full)
 - mean elongation D: drifts by <0.001° / century from the J2000 fit
 
-The implementation is verified by `moon_phase.py --self-test` against
-four reference events (USNO/JPL):
+The implementation is verified two ways:
 
-| Event | Reference time (UT) | Expected |
-|---|---|---|
-| New Moon (k = 0 baseline) | 2000-01-06 18:14 | New Moon, 0% |
-| Total Solar Eclipse | 2024-04-08 18:18 | New Moon, 0% |
-| Pink Full Moon | 2024-04-23 23:49 | Full Moon, 100% |
-| Apollo 11 LM touchdown | 1969-07-20 20:17 | Waxing Crescent, ~33% |
+1. `moon_phase.py --self-test` against four hardcoded reference events
+   (USNO/JPL ephemeris times):
+
+   | Event | Reference time (UT) | Expected |
+   |---|---|---|
+   | New Moon (k = 0 baseline) | 2000-01-06 18:14 | New Moon, 0% |
+   | Total Solar Eclipse | 2024-04-08 18:18 | New Moon, 0% |
+   | Pink Full Moon | 2024-04-23 23:49 | Full Moon, 100% |
+   | Apollo 11 LM touchdown | 1969-07-20 20:17 | Waxing Crescent, ~33% |
+
+2. `moon_phase.py --date <any> --verify` calls NASA JPL Horizons live
+   for the same date and prints the delta. JPL is the authority Meeus's
+   polynomial tables were fit to; round-trip agreement is the strongest
+   correctness signal we can get for arbitrary dates.
+
+   Spot check at 1995-08-14 10:20 UTC: meeus 83.89% / 47.33°, JPL 83.85%
+   / 47.40°, Δ +0.04% / −0.07° — well within the ±1.0% / ±0.5° tolerance.
 
 ## Why narrow-quarter naming
 

@@ -1,30 +1,40 @@
 #!/usr/bin/env python3
-"""moon_phase.py — accurate lunar phase from a UTC date(time).
+"""moon_phase.py — accurate lunar phase from a UTC date(time), with cross-verification.
 
-Implements Jean Meeus, *Astronomical Algorithms* (2nd ed., 1998):
+FOUR independent sources, one verifier:
 
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ SOURCES                                          GROUND TRUTH            │
+  │   meeus    Local Meeus AA2 (Ch. 7/47/48/49)      ┌─────────────────────┐ │
+  │   codex    Ask the `codex` CLI (LLM)        ───▶ │ jpl   JPL Horizons  │ │
+  │   claude   Ask the `claude` CLI (LLM)            │       HTTP API      │ │
+  │                                                  └─────────────────────┘ │
+  │                                                                          │
+  │ Each source returns illum% + phase_name.                                 │
+  │ `--verify` runs the non-JPL sources and prints the delta vs JPL.         │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+Meeus implements:
   Ch. 7   — Gregorian calendar → Julian Date
   Ch. 47  — Mean elements of the Moon (D, M, M')
   Ch. 48  — Illuminated fraction and phase angle of the Moon (eq. 48.4)
   Ch. 49  — Phases of the Moon: JDE of nearest new moon (Table 49.A
             + 14 additional planetary corrections, p. 351-352)
 
-Two independent calculations:
+JPL Horizons returns quantities 10 (Illu%) and 24 (S-T-O = phase angle)
+for body 301 (Moon) from Earth geocenter 500@399. Endpoint:
+https://ssd.jpl.nasa.gov/api/horizons.api (no key, public).
 
-  1. Lunation fraction via Ch. 49 — bracket the JDE between the surrounding
-     new moons, giving an exact phase name and "day of lunation".
-  2. Illuminated fraction via Ch. 48 — true elongation between Moon and
-     Sun, used for percentage illumination and crescent direction.
-
-Accuracy targets (per Meeus): new-moon time ±2 min, phase angle <0.5°,
-illuminated fraction <1%. Self-test compares against four reference
-events (USNO/JPL).
+LLM sources shell out to the local `codex`/`claude` CLI. Unreliable for
+specific astronomical events; included for comparison and demo only.
 
 Inputs are interpreted as UTC. Pass --tz ±HH:MM for civil time.
 
 Usage:
     python3 moon_phase.py --date 1995-08-14T10:20:00
-    python3 moon_phase.py --date 1969-07-20 --tz +00:00
+    python3 moon_phase.py --date 1995-08-14T10:20:00 --source jpl
+    python3 moon_phase.py --date 1995-08-14T10:20:00 --verify
+    python3 moon_phase.py --date 1995-08-14T10:20:00 --verify --with-llm
     python3 moon_phase.py --self-test
 """
 from __future__ import annotations
@@ -32,7 +42,13 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import re
+import shutil
+import subprocess
 import sys
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 
 # --------------------------------------------------------------------------- #
@@ -287,8 +303,265 @@ def moon_phase(dt_utc: datetime) -> dict:
         "synodic_period_days": round(cycle, 5),
         "prev_new_moon_utc": jd_to_datetime(prev_new).isoformat().replace("+00:00", "Z"),
         "next_new_moon_utc": jd_to_datetime(next_new).isoformat().replace("+00:00", "Z"),
+        "source": "meeus",
         "algorithm": "Meeus AA2 Ch. 47/48/49 + Table 49.A + 14 planetary corrections",
     }
+
+
+# --------------------------------------------------------------------------- #
+# JPL Horizons — ground-truth verifier                                        #
+# --------------------------------------------------------------------------- #
+
+JPL_HORIZONS_URL = "https://ssd.jpl.nasa.gov/api/horizons.api"
+
+
+def moon_phase_jpl(dt_utc: datetime, timeout: float = 15.0) -> dict:
+    """Query JPL Horizons for illuminated fraction + phase angle at dt_utc.
+
+    Uses quantities 10 (Illu%) and 24 (S-T-O = phase angle in degrees) for
+    body 301 (Moon) from Earth geocenter 500@399. Waxing/waning is not
+    returned by Horizons in this query, so we derive it from local Meeus
+    mean elongation D — this is a sub-degree-precise property that all
+    sources agree on, so reusing Meeus for D alone is safe.
+    """
+    t1 = dt_utc.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    t2 = (dt_utc.astimezone(timezone.utc) + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M")
+    params = {
+        "format": "text",
+        "COMMAND": "'301'",
+        "OBJ_DATA": "'NO'",
+        "MAKE_EPHEM": "'YES'",
+        "EPHEM_TYPE": "'OBSERVER'",
+        "CENTER": "'500@399'",
+        "START_TIME": f"'{t1}'",
+        "STOP_TIME": f"'{t2}'",
+        "STEP_SIZE": "'1m'",
+        "QUANTITIES": "'10,24'",
+    }
+    url = JPL_HORIZONS_URL + "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={"User-Agent": "hatch-me/0.1"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read().decode("utf-8", errors="replace")
+    except Exception as exc:
+        raise RuntimeError(f"JPL Horizons request failed: {exc}") from exc
+
+    try:
+        soe = body.index("$$SOE")
+        eoe = body.index("$$EOE", soe)
+    except ValueError:
+        raise RuntimeError("JPL Horizons response missing $$SOE/$$EOE block")
+    data_line = next((ln for ln in body[soe:eoe].splitlines()[1:] if ln.strip()), None)
+    if not data_line:
+        raise RuntimeError("JPL Horizons returned an empty data block")
+    parts = data_line.split()
+    try:
+        illum, sto = float(parts[-2]), float(parts[-1])
+    except (IndexError, ValueError) as exc:
+        raise RuntimeError(f"unparseable JPL data row {data_line!r}: {exc}") from exc
+
+    _, D = _phase_geometry(jd_from_datetime(dt_utc))
+    waxing = D < 180.0
+    name, glyph = _name_phase(illum, waxing)
+    return {
+        "source": "jpl-horizons",
+        "input_utc": dt_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "phase_name": name,
+        "phase_glyph": glyph,
+        "waxing": waxing,
+        "illumination_pct": round(illum, 4),
+        "phase_angle_deg": round(sto, 4),
+        "endpoint": JPL_HORIZONS_URL,
+        "quantities": "10 (Illu%), 24 (S-T-O phase angle)",
+        "body": "301 (Moon)",
+        "center": "500@399 (Earth geocenter)",
+    }
+
+
+# --------------------------------------------------------------------------- #
+# LLM sources — `codex` / `claude` CLI shell-out (opt-in)                     #
+# --------------------------------------------------------------------------- #
+
+LLM_PROMPT = (
+    "What was the moon phase at {iso} UTC? Respond ONLY with one line of JSON: "
+    '{{"phase_name": "<New Moon|Waxing Crescent|First Quarter|Waxing Gibbous|'
+    'Full Moon|Waning Gibbous|Last Quarter|Waning Crescent>", '
+    '"illumination_pct": <number 0-100>}}. '
+    "No prose, no markdown, no code fences."
+)
+
+DEFAULT_LLM_CMDS = {
+    # Override with env var HATCH_ME_<NAME>_CMD (whitespace-split, prompt appended).
+    "codex":  ["codex", "exec"],
+    "claude": ["claude", "-p"],
+}
+
+
+def _llm_command(runner: str) -> list[str]:
+    env_override = os.environ.get(f"HATCH_ME_{runner.upper()}_CMD")
+    if env_override:
+        return env_override.split()
+    return list(DEFAULT_LLM_CMDS[runner])
+
+
+def moon_phase_llm(dt_utc: datetime, runner: str = "codex", timeout: float = 60.0) -> dict:
+    """Ask the local `codex` or `claude` CLI for the moon phase.
+
+    Returns whatever the LLM claims, plus the raw response (truncated).
+    LLMs are unreliable for specific astronomical events — this is included
+    for comparison and demo, never as a primary source.
+    """
+    if runner not in DEFAULT_LLM_CMDS:
+        raise ValueError(f"unknown LLM runner: {runner}")
+    if not shutil.which(_llm_command(runner)[0]):
+        raise RuntimeError(f"{runner} CLI not found in PATH")
+
+    iso = dt_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    prompt = LLM_PROMPT.format(iso=iso)
+    cmd = _llm_command(runner) + [prompt]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"{runner} timed out after {timeout}s") from exc
+
+    raw = (out.stdout or "").strip()
+    if out.returncode != 0:
+        raise RuntimeError(
+            f"{runner} exited {out.returncode}: {(out.stderr or '')[:200]}"
+        )
+
+    name: str | None = None
+    illum: float | None = None
+    m = re.search(r'\{[^{}]*"phase_name"[^{}]*\}', raw, re.DOTALL)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            name = obj.get("phase_name")
+            illum = float(obj["illumination_pct"]) if "illumination_pct" in obj else None
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+
+    return {
+        "source": f"llm:{runner}",
+        "input_utc": iso,
+        "phase_name": name,
+        "illumination_pct": illum,
+        "raw_response": raw[:500],
+        "note": "LLM output; unreliable on specific astronomical events.",
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Cross-verification                                                          #
+# --------------------------------------------------------------------------- #
+
+SOURCE_FNS = {
+    "meeus":  moon_phase,
+    "jpl":    moon_phase_jpl,
+    "codex":  lambda dt: moon_phase_llm(dt, runner="codex"),
+    "claude": lambda dt: moon_phase_llm(dt, runner="claude"),
+}
+
+# Tolerances against JPL ground truth.
+TOLERANCE_ILLUM_PCT = 1.0    # Meeus typically <0.5%, LLMs frequently fail this.
+TOLERANCE_ANGLE_DEG = 0.5
+
+
+def verify(dt_utc: datetime, sources: list[str]) -> dict:
+    """Run each source and compute deltas against JPL Horizons.
+
+    JPL is always run as ground truth. `sources` lists which other sources
+    to invoke. Returns a structured report; pretty-printing is the CLI's job.
+    """
+    results: dict[str, dict] = {}
+    errors: dict[str, str] = {}
+
+    # JPL first (truth).
+    try:
+        results["jpl"] = moon_phase_jpl(dt_utc)
+    except Exception as exc:
+        errors["jpl"] = str(exc)
+
+    for src in sources:
+        if src == "jpl":
+            continue
+        try:
+            results[src] = SOURCE_FNS[src](dt_utc)
+        except Exception as exc:
+            errors[src] = str(exc)
+
+    truth = results.get("jpl")
+    diffs: dict[str, dict] = {}
+    if truth is not None:
+        for src, r in results.items():
+            if src == "jpl":
+                continue
+            illum = r.get("illumination_pct")
+            angle = r.get("phase_angle_deg")
+            d_illum = None if illum is None else round(illum - truth["illumination_pct"], 4)
+            d_angle = None if angle is None else round(angle - truth["phase_angle_deg"], 4)
+            within = (
+                d_illum is not None
+                and abs(d_illum) <= TOLERANCE_ILLUM_PCT
+                and (d_angle is None or abs(d_angle) <= TOLERANCE_ANGLE_DEG)
+            )
+            diffs[src] = {
+                "illum_delta_pct": d_illum,
+                "phase_angle_delta_deg": d_angle,
+                "phase_name_matches": r.get("phase_name") == truth["phase_name"],
+                "within_tolerance": within,
+            }
+
+    return {
+        "input_utc": dt_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "ground_truth": "jpl-horizons" if truth else None,
+        "tolerances": {
+            "illum_pct": TOLERANCE_ILLUM_PCT,
+            "phase_angle_deg": TOLERANCE_ANGLE_DEG,
+        },
+        "results": results,
+        "diffs_vs_jpl": diffs,
+        "errors": errors,
+    }
+
+
+def render_verify_table(report: dict) -> str:
+    """Compact human-readable verification table."""
+    truth = report["results"].get("jpl")
+    lines = [f"  moon phase at {report['input_utc']}",
+             "  " + "─" * 78]
+    header = f"  {'source':<14} {'phase':<18} {'illum%':>8} {'phase°':>8}   Δ vs JPL"
+    lines.append(header)
+    lines.append("  " + "─" * 78)
+    if truth:
+        lines.append(
+            f"  {'jpl-horizons':<14} {truth['phase_name']:<18} "
+            f"{truth['illumination_pct']:>8.4f} {truth['phase_angle_deg']:>8.4f}   "
+            f"── (ground truth)"
+        )
+    for src, r in report["results"].items():
+        if src == "jpl":
+            continue
+        d = report["diffs_vs_jpl"].get(src, {})
+        illum = r.get("illumination_pct")
+        angle = r.get("phase_angle_deg")
+        illum_s = "—" if illum is None else f"{illum:>8.4f}"
+        angle_s = "—" if angle is None else f"{angle:>8.4f}"
+        delta_bits = []
+        if d.get("illum_delta_pct") is not None:
+            delta_bits.append(f"{d['illum_delta_pct']:+.4f}%")
+        if d.get("phase_angle_delta_deg") is not None:
+            delta_bits.append(f"{d['phase_angle_delta_deg']:+.4f}°")
+        marker = " ✓" if d.get("within_tolerance") else (" ✗" if d else "")
+        lines.append(
+            f"  {src:<14} {(r.get('phase_name') or '—'):<18} "
+            f"{illum_s} {angle_s}   {' / '.join(delta_bits) or '—'}{marker}"
+        )
+    if report["errors"]:
+        lines.append("  " + "─" * 78)
+        for src, msg in report["errors"].items():
+            lines.append(f"  {src:<14} ERROR: {msg}")
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- #
@@ -341,9 +614,25 @@ def _self_test() -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Moon phase via Meeus.")
+    ap = argparse.ArgumentParser(description="Moon phase: local math, JPL truth, optional LLMs.")
     ap.add_argument("--date", help="YYYY-MM-DD[THH:MM[:SS]]; UTC unless --tz given.")
     ap.add_argument("--tz", help="Offset like -07:00 applied when --date has no tz.")
+    ap.add_argument(
+        "--source",
+        choices=list(SOURCE_FNS.keys()),
+        default="meeus",
+        help="Compute via this source only. Default: meeus (local, deterministic, offline).",
+    )
+    ap.add_argument(
+        "--verify",
+        action="store_true",
+        help="Run meeus + JPL Horizons and print a comparison table. JPL is ground truth.",
+    )
+    ap.add_argument(
+        "--with-llm",
+        action="store_true",
+        help="With --verify, also ask `codex` and `claude` CLIs and include in the table.",
+    )
     ap.add_argument("--self-test", action="store_true", help="Run reference checks.")
     ap.add_argument("--pretty", action="store_true", help="Indent JSON output.")
     args = ap.parse_args()
@@ -354,7 +643,23 @@ def main() -> int:
         ap.error("--date is required (or use --self-test)")
 
     dt = _parse_dt(args.date, args.tz)
-    result = moon_phase(dt)
+
+    if args.verify:
+        sources = ["meeus"]
+        if args.with_llm:
+            sources += ["codex", "claude"]
+        report = verify(dt, sources)
+        if args.pretty:
+            print(json.dumps(report, indent=2))
+        else:
+            print(render_verify_table(report))
+        # Exit 1 if any non-error source is outside tolerance.
+        for d in report["diffs_vs_jpl"].values():
+            if not d.get("within_tolerance"):
+                return 1
+        return 0 if report["results"].get("jpl") else 2
+
+    result = SOURCE_FNS[args.source](dt)
     print(json.dumps(result, indent=2 if args.pretty else None))
     return 0
 

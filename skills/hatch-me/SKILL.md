@@ -5,35 +5,68 @@ description: Hatch the user as a tiny Codex baby agent deterministically derived
 
 # hatch-me
 
-> A first-person fork of [`hatch-mom`](../hatch-mom/SKILL.md). Same Soul/Bones
-> contract — the seed comes from your DOB instead of a session UUID, and the
-> moon phase at the moment of birth rides along.
+> Same Soul/Bones contract as `hatch-mom` — the seed comes from your DOB
+> instead of a session UUID, and the moon phase at the moment of birth
+> rides along. The phase is computed from local math and (when network
+> is available) cross-checked against NASA JPL Horizons.
 
 ```
-DOB ─┐
-     │   ┌──────────────────────────┐
-     ├──▶│ scripts/moon_phase.py    │── phase, illumination, age ─┐
-     │   │ Meeus AA2 Ch. 47/48/49   │                              │
-     │   └──────────────────────────┘                              ▼
-     │                                                ┌──────────────────────────┐
-     │                                                │ scripts/hatch.py          │
-     └───────────────────────────────────────────────▶│ BLAKE2b(salt|dob|moon)    │
-                                                      │ → SplitMix64 → Soul       │
-                                                      └────────────┬─────────────┘
-                                                                   ▼
-                                       ~/.codex/memories/babies/<name>/baby.json
-                                                + ASCII birth card on stdout
+                              ┌──────────────────────────────┐
+                              │ sources                      │
+                       ┌──────┤   meeus    local AA2 math    │
+                       │      │   codex    LLM ask (opt-in)  │
+                       │      │   claude   LLM ask (opt-in)  │
+                       │      └──────────────────────────────┘
+                       │
+DOB ─┐                 ▼
+     │      illum%, phase_name      ┌──────────────────────────────────┐
+     │  ┌────────────────────────┐  │ ground truth                     │
+     ├──┤                         ├─▶│   jpl    NASA JPL Horizons HTTP │
+     │  └────────────────────────┘  │          quantities 10 + 24      │
+     │                              └──────────────┬───────────────────┘
+     │                                             ▼
+     │                              illum Δ ≤ 1.0% ?
+     │                              angle Δ ≤ 0.5° ?
+     │                                             │
+     │                                             ▼
+     │                                ┌──────────────────────────┐
+     └───────────────────────────────▶│ scripts/hatch.py          │
+                                      │ BLAKE2b(salt|dob|moon)    │
+                                      │ → SplitMix64 → Soul       │
+                                      └────────────┬─────────────┘
+                                                   ▼
+                              ~/.codex/memories/babies/<name>/baby.json
+                                       + ASCII birth card on stdout
 ```
 
 ## API
 
 | script | input | output |
 | --- | --- | --- |
-| `scripts/moon_phase.py --date YYYY-MM-DD[THH:MM][±HH:MM]` | UTC datetime (or with `--tz`) | JSON: `phase_name`, `phase_glyph`, `waxing`, `illumination_pct`, `phase_angle_deg`, `lunation_day`, `prev_new_moon_utc` |
+| `scripts/moon_phase.py --date YYYY-MM-DD[THH:MM][±HH:MM]` | UTC datetime (or with `--tz`) | JSON from `--source meeus` (default), `jpl`, `codex`, or `claude` |
+| `scripts/moon_phase.py --date ... --source jpl` | same | JSON from JPL Horizons HTTP API (ground truth) |
+| `scripts/moon_phase.py --date ... --verify [--with-llm]` | same | comparison table: meeus (and optionally codex/claude) vs JPL, with Δ illum% and Δ phase°. Exit 1 if any source falls outside tolerance |
 | `scripts/moon_phase.py --self-test` | — | 4 reference checks (new/full moons, Apollo 11) |
 | `scripts/hatch.py --dob YYYY-MM-DD[THH:MM] [--tz ±HH:MM]` | DOB | writes `baby.json`, prints birth card |
 | `scripts/hatch.py --name <Name>` | existing baby | reload, re-print card |
 | `scripts/hatch.py --list` | — | enumerate all hatched selves |
+
+### Cross-verification
+
+`hatch.py` always uses the local Meeus source (deterministic, offline). To
+audit the math against NASA JPL Horizons for any date:
+
+```bash
+python3 scripts/moon_phase.py --date 1995-08-14T10:20:00Z --verify
+#   moon phase at 1995-08-14T10:20:00Z
+#   source         phase                illum%   phase°   Δ vs JPL
+#   jpl-horizons   Waning Gibbous      83.8492  47.3955   ── (ground truth)
+#   meeus          Waning Gibbous      83.8900  47.3280   +0.0408% / -0.0675° ✓
+```
+
+Tolerances: illumination ±1.0%, phase angle ±0.5°. With `--with-llm` the
+table also includes `codex` and `claude` (shells out to local CLIs, slow,
+unreliable on specific dates — included for comparison only).
 
 ## Install
 
@@ -74,14 +107,16 @@ from `personality_seed` and always come out identical.
 
 ## Accuracy
 
-- **Algorithm.** Meeus, *Astronomical Algorithms* (2nd ed., 1998):
+- **Local algorithm.** Meeus, *Astronomical Algorithms* (2nd ed., 1998):
   Ch. 7 (JD), Ch. 47 (mean elements), Ch. 48 eq. 48.4 (phase angle &
   illumination), Ch. 49 Table 49.A + 14 planetary corrections (new moon JDE).
-- **Target precision.** New-moon time ±2 min; illuminated fraction <1%;
+  Target precision: new-moon time ±2 min; illuminated fraction <1%;
   phase-angle error <0.5°. See [`references/algorithm.md`](references/algorithm.md).
-- **Verify.** `python3 scripts/moon_phase.py --self-test` checks four reference
-  events (USNO/JPL): 2000-01-06 new, 2024-04-08 new (eclipse), 2024-04-23 full,
-  1969-07-20 Apollo 11.
+- **Ground truth.** NASA JPL Horizons HTTP API (no key) for any epoch.
+  Body 301 (Moon), Earth geocenter 500@399, quantities 10 (Illu%) + 24 (S-T-O).
+- **Two-way check.** `--verify` runs both for any user-supplied date and
+  prints the delta; `--self-test` runs four hardcoded reference events
+  (2000-01-06 new, 2024-04-08 eclipse new, 2024-04-23 full, 1969-07-20 Apollo 11).
 - **Naming.** Narrow-quarter convention (matches USNO / TimeAndDate): the four
   cardinal phase names only apply within ±1 day of the actual event;
   everything else is crescent or gibbous, waxing or waning.
